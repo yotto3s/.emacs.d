@@ -8,6 +8,9 @@
   (which-key-mode)
   )
 
+(use-package magit
+  :ensure t)
+
 (use-package eglot
   :ensure t
   :config
