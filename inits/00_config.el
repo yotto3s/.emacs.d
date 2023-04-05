@@ -24,10 +24,11 @@
 
 (setq ns-pop-up-frames nil)
 
-(add-to-list 'default-frame-alist '(alpha . (0.85 0.85)))
+(add-to-list 'default-frame-alist '(alpha . (1.0 1.0)))
 
 (menu-bar-mode -1)
 (tool-bar-mode -1)
+(scroll-bar-mode -1)
 
 (column-number-mode t)
 (global-linum-mode t)
