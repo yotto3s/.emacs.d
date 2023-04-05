@@ -1,0 +1,9 @@
+/*
+/.**
+
+# track this file
+!.gitignore
+# whitelist
+!/init.el
+!/inits/
+!/inits/**
