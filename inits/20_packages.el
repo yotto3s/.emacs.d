@@ -11,6 +11,16 @@
 (use-package magit
   :ensure t)
 
+(use-package ddskk
+  :ensure t
+  :config
+  (when (require 'skk nil t)
+    (global-set-key (kbd "C-x C-j") 'skk-mode)
+    (global-set-key (kbd "C-x j") 'skk-auto-fill-mode)
+    (require 'skk-study))
+  (add-hook 'isearch-mode-hook 'skk-isearch-mode-setup)
+  (add-hook 'isearch-mode-end-hook 'skk-isearch-mode-cleanup))
+
 (use-package eglot
   :ensure t
   :config
