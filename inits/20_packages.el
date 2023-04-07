@@ -40,6 +40,9 @@
   (setq company-dabbrev-downcase nil)
   (setq company-selection-wrap-around t))
 
+(use-package company-fuzzy
+  :ensure t)
+
 (use-package julia-mode
   :ensure t)
 (use-package julia-repl
