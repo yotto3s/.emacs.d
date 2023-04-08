@@ -13,11 +13,9 @@
 
 (use-package ddskk
   :ensure t
+  :bind (("C-x C-j" . skk-mode)
+         ("C-x j" . skk-auto-fill-mode))
   :config
-  (when (require 'skk nil t)
-    (global-set-key (kbd "C-x C-j") 'skk-mode)
-    (global-set-key (kbd "C-x j") 'skk-auto-fill-mode)
-    (require 'skk-study))
   (add-hook 'isearch-mode-hook 'skk-isearch-mode-setup)
   (add-hook 'isearch-mode-end-hook 'skk-isearch-mode-cleanup))
 
@@ -26,30 +24,19 @@
   :config
   (define-key eglot-mode-map (kbd "M-.") 'xref-find-definitions)
   (define-key eglot-mode-map (kbd "M-,") 'pop-tag-mark)
-  (add-to-list 'eglot-server-programs
-	           '(julia-mode . ("julia" "-e using LanguageServer, LanguageServer.SymbolServer; runserver()")))
-  (add-hook 'julia-mode-hook 'julia-repl-mode)
   )
 
-(use-package company
-  :ensure t
-  :config
-  (global-company-mode)
-  (setq company-idle-delay 0)
-  (setq company-minimum-prefix-length 2)
-  (setq company-dabbrev-downcase nil)
-  (setq company-selection-wrap-around t))
 
-(use-package company-fuzzy
-  :ensure t)
 
 (use-package julia-mode
-  :ensure t)
+  :init (add-to-list 'eglot-server-programs
+                     '(julia-mode . ("julia" "-e using LanguageServer, LanguageServer.SymbolServer; runserver()"))))
+
 (use-package julia-repl
-  :ensure t)
+  :hook julia-mode
+  )
 
 (use-package haskell-mode
-  :ensure t
   :config
   (require 'haskell-interactive-mode)
   (require 'haskell-process)
@@ -62,8 +49,6 @@
   (define-key haskell-mode-map (kbd "C-c C-k") 'haskell-interactive-mode-clear)
   (define-key haskell-mode-map (kbd "C-c c") 'haskell-process-cabal)
   )
-(use-package elm-mode
-  :ensure t)
+(use-package elm-mode)
 
-(use-package python-mode
-  :ensure t)
+(use-package python-mode)
