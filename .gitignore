@@ -1,0 +1,31 @@
+# Compiled
+*.elc
+
+# Package manager
+elpa/
+elpaca/
+
+# Auto-generated
+auto-save-list/
+tramp
+recentf
+bookmarks
+places
+smex-items
+ido.last
+
+# Native compilation cache
+eln-cache/
+var/
+
+# LSP
+.cache/
+lsp-session-*
+
+# Custom settings (keep or track separately)
+custom.el
+
+# Backup and lock files
+*~
+\#*\#
+.\#*
