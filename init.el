@@ -164,16 +164,21 @@
      (directory-file-name default-directory))))
 
 (defun my/vterm-tmux ()
-  "Open vterm and attach to (or create) a tmux session for current project."
+  "Open vterm and attach to tmux session, local or remote."
   (interactive)
   (let* ((session (my/tmux-session-name))
-         (buf-name (format "*vterm:%s*" session)))
+         (remote (file-remote-p default-directory 'host))
+         (buf-name (format "*vterm:%s%s*"
+                           (if remote (concat remote ":") "")
+                           session)))
     (if (get-buffer buf-name)
         (switch-to-buffer buf-name)
       (let ((buf (vterm buf-name)))
         (with-current-buffer buf
           (vterm-send-string
-           (format "tmux new-session -A -s %s\n" session)))))))
+           (if remote
+               (format "ssh %s -t 'tmux new-session -A -s %s'\n" remote session)
+             (format "tmux new-session -A -s %s\n" session)))))))))
 
 (global-set-key (kbd "C-c t") #'my/vterm-tmux)
 
