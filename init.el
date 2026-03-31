@@ -148,6 +148,12 @@
   (skk-hiragana-mode-string "[あ]")
   (skk-katakana-mode-string "[ア]"))
 
+;;; Which-key
+
+(use-package which-key
+  :init (which-key-mode)
+  :custom (which-key-idle-delay 0.5))
+
 ;;; Vterm + Tmux integration
 
 (use-package vterm
@@ -155,32 +161,107 @@
   (vterm-max-scrollback 10000)
   (vterm-shell "/bin/bash"))
 
-(defun my/tmux-session-name ()
-  "Return tmux session name based on current project or directory."
-  (if-let (project (project-current))
-      (file-name-nondirectory
-       (directory-file-name (project-root project)))
-    (file-name-nondirectory
-     (directory-file-name default-directory))))
+(defun my/tramp-info ()
+  "Return plist (:method :host :ssh-host :localname) for current TRAMP buffer, or nil."
+  (when (file-remote-p default-directory)
+    (let* ((vec       (tramp-dissect-file-name default-directory))
+           (method    (tramp-file-name-method vec))
+           (host      (tramp-file-name-host vec))
+           (localname (tramp-file-name-localname vec))
+           (hop       (when (fboundp 'tramp-file-name-hop)
+                        (tramp-file-name-hop vec)))
+           (ssh-host  (cond
+                       ((and hop (string-match "ssh" hop))
+                        (tramp-file-name-host
+                         (tramp-dissect-file-name (concat hop "/"))))
+                       ((equal method "ssh") host))))
+      (list :method method :host host :ssh-host ssh-host :localname localname))))
+
+(defun my/tmux-session-name (&optional tramp-info)
+  "Return tmux session name based on current project or directory.
+For remote buffers, uses the path on the remote machine only.
+Optionally accepts pre-computed TRAMP-INFO plist to avoid redundant parsing."
+  (let* ((info  (or tramp-info (my/tramp-info)))
+         (root  (if-let (project (project-current))
+                    (project-root project)
+                  default-directory))
+         (path  (directory-file-name
+                 (if info
+                     (tramp-file-name-localname
+                      (tramp-dissect-file-name root))
+                   (expand-file-name root))))
+         (name  (replace-regexp-in-string "[[:space:]]" "_"
+                 (replace-regexp-in-string "/" "-" path))))
+    (if (string-empty-p name) "default" (string-trim-left name "-"))))
+
+(defun my/tmux-command (session container)
+  "Build tmux new-session command, optionally launching into CONTAINER."
+  (if container
+      (format "tmux new-session -A -s %s 'docker exec -it %s bash'"
+              session container)
+    (format "tmux new-session -A -s %s" session)))
 
 (defun my/vterm-tmux ()
-  "Open vterm and attach to tmux session, local or remote."
+  "Open vterm and attach to tmux session, local or remote.
+If inside a docker container, the tmux session launches into it."
   (interactive)
-  (let* ((session (my/tmux-session-name))
-         (remote (file-remote-p default-directory 'host))
-         (buf-name (format "*vterm:%s%s*"
-                           (if remote (concat remote ":") "")
-                           session)))
+  (unless (fboundp 'vterm)
+    (user-error "vtermがインストールされていません: M-x package-install RET vterm"))
+  (let* ((info      (my/tramp-info))
+         (session   (my/tmux-session-name info))
+         (ssh-host  (plist-get info :ssh-host))
+         (container (when (equal (plist-get info :method) "docker")
+                      (plist-get info :host)))
+         (tmux-cmd  (my/tmux-command session container))
+         (buf-name  (format "*vterm:%s%s*"
+                            (if ssh-host (concat ssh-host ":") "")
+                            session)))
     (if (get-buffer buf-name)
         (switch-to-buffer buf-name)
       (let ((buf (vterm buf-name)))
-        (with-current-buffer buf
-          (vterm-send-string
-           (if remote
-               (format "ssh %s -t 'tmux new-session -A -s %s'\n" remote session)
-             (format "tmux new-session -A -s %s\n" session)))))))))
+        (run-with-timer 0.5 nil
+                        (lambda ()
+                          (with-current-buffer buf
+                            (vterm-send-string
+                             (if ssh-host
+                                 (format "ssh %s -t \"%s\"\n" ssh-host tmux-cmd)
+                               (format "%s\n" tmux-cmd))))))))))
 
 (global-set-key (kbd "C-c t") #'my/vterm-tmux)
+
+;;; Tab bar
+
+(use-package tab-bar
+  :ensure nil
+  :custom
+  (tab-bar-show 1)                  ; タブが2つ以上のときのみ表示
+  (tab-bar-close-button-show nil)
+  (tab-bar-new-button-show nil)
+  (tab-bar-tab-hints t)             ; タブに番号を表示
+  :init (tab-bar-mode 1)
+  :bind (("C-x t 2" . tab-bar-new-tab)
+         ("C-x t 0" . tab-bar-close-tab)
+         ("C-x t o" . tab-bar-switch-to-next-tab)
+         ("C-x t O" . tab-bar-switch-to-prev-tab)
+         ("C-x t r" . tab-bar-rename-tab)
+         ("M-1"     . (lambda () (interactive) (tab-bar-select-tab 1)))
+         ("M-2"     . (lambda () (interactive) (tab-bar-select-tab 2)))
+         ("M-3"     . (lambda () (interactive) (tab-bar-select-tab 3)))
+         ("M-4"     . (lambda () (interactive) (tab-bar-select-tab 4)))))
+
+;;; Formatter
+
+(use-package reformatter
+  :config
+  (reformatter-define clang-format
+    :program "clang-format"
+    :args '("--style=file"))
+  (reformatter-define black-format
+    :program "black"
+    :args '("-"))
+  :hook
+  (c++-mode . (lambda () (local-set-key (kbd "C-c F") #'clang-format-buffer)))
+  (python-mode . (lambda () (local-set-key (kbd "C-c F") #'black-format-buffer))))
 
 ;;; Magit
 
