@@ -127,7 +127,7 @@
       (unless (file-exists-p path)
         (make-directory (file-name-directory path) t)
         (with-temp-file path
-          (insert (format "#+TITLE: %s\n#+DATE: %s\n\n* Tasks\n\n* Notes\n"
+          (insert (format "#+TITLE: %s\n#+DATE: %s\n\n* Tasks\n\n* Notes\n\n* Journal\n"
                           date date))))
       path))
   (defun my/org-open-today ()
@@ -161,7 +161,6 @@
   (vterm-max-scrollback 10000)
   (vterm-shell "/bin/bash"))
 
-(defun my/tramp-info ()
 (defun my/tramp-info ()
   "Return plist (:method :host :localname) for current TRAMP buffer, or nil."
   (when (file-remote-p default-directory)
@@ -200,7 +199,7 @@ Optionally accepts pre-computed TRAMP-INFO plist to avoid redundant parsing."
 If inside a docker container, exits the container first then runs tmux."
   (interactive)
   (unless (fboundp 'vterm)
-    (user-error "vterm is not installed: M-x package-install RET vterm"))
+    (user-error "vtermがインストールされていません: M-x package-install RET vterm"))
   (let* ((info      (my/tramp-info))
          (session   (my/tmux-session-name info))
          (container (when (equal (plist-get info :method) "docker")
@@ -229,20 +228,25 @@ If inside a docker container, exits the container first then runs tmux."
 (use-package tab-bar
   :ensure nil
   :custom
-  (tab-bar-show 1)                  ; タブが2つ以上のときのみ表示
+  (tab-bar-show 1)
   (tab-bar-close-button-show nil)
   (tab-bar-new-button-show nil)
-  (tab-bar-tab-hints t)             ; タブに番号を表示
-  :init (tab-bar-mode 1)
+  (tab-bar-tab-hints t)
+  :init
+  (tab-bar-mode 1)
+  (defalias 'my/tab-1 (lambda () (interactive) (tab-bar-select-tab 1)))
+  (defalias 'my/tab-2 (lambda () (interactive) (tab-bar-select-tab 2)))
+  (defalias 'my/tab-3 (lambda () (interactive) (tab-bar-select-tab 3)))
+  (defalias 'my/tab-4 (lambda () (interactive) (tab-bar-select-tab 4)))
   :bind (("C-x t 2" . tab-bar-new-tab)
          ("C-x t 0" . tab-bar-close-tab)
          ("C-x t o" . tab-bar-switch-to-next-tab)
          ("C-x t O" . tab-bar-switch-to-prev-tab)
          ("C-x t r" . tab-bar-rename-tab)
-         ("M-1"     . (lambda () (interactive) (tab-bar-select-tab 1)))
-         ("M-2"     . (lambda () (interactive) (tab-bar-select-tab 2)))
-         ("M-3"     . (lambda () (interactive) (tab-bar-select-tab 3)))
-         ("M-4"     . (lambda () (interactive) (tab-bar-select-tab 4)))))
+         ("M-1"     . my/tab-1)
+         ("M-2"     . my/tab-2)
+         ("M-3"     . my/tab-3)
+         ("M-4"     . my/tab-4)))
 
 ;;; Formatter
 
@@ -292,7 +296,6 @@ If inside a docker container, exits the container first then runs tmux."
          ("C-x p k" . project-kill-buffers)))
 
 ;;; Keybindings
-
 (global-set-key (kbd "M-o") #'other-window)
 (global-set-key (kbd "C-h") #'backward-delete-char-untabify)
 (global-set-key (kbd "M-h") #'backward-kill-word)
