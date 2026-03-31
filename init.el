@@ -109,9 +109,9 @@
   (org-todo-keywords
    '((sequence "TODO(t)" "IN-PROGRESS(i)" "WAITING(w)" "|" "DONE(d)" "CANCELLED(c)")))
   (org-capture-templates
-   '(("t" "Task"    entry (file+headline "~/orgfiles/inbox.org" "Tasks")
-      "* TODO %?\n  %U\n")
-     ("m" "Memo"    entry (file #'my/org-daily-file)
+   '(("t" "Task"    entry (file (lambda () (my/org-daily-file)))
+      "* TODO %?\n  SCHEDULED: %t\n  %U\n")
+     ("m" "Memo"    entry (file (lambda () (my/org-daily-file)))
       "* %?\n  %U\n")
      ("b" "Backlog" entry (file+headline "~/orgfiles/inbox.org" "Backlog")
       "* TODO %?\n  %U\n")))
@@ -127,7 +127,7 @@
       (unless (file-exists-p path)
         (make-directory (file-name-directory path) t)
         (with-temp-file path
-          (insert (format "#+TITLE: %s\n#+DATE: %s\n\n* Tasks\n\n* Notes\n\n* Journal\n"
+          (insert (format "#+TITLE: %s\n#+DATE: %s\n\n* Tasks\n\n* Notes\n"
                           date date))))
       path))
   (defun my/org-open-today ()
@@ -162,20 +162,14 @@
   (vterm-shell "/bin/bash"))
 
 (defun my/tramp-info ()
-  "Return plist (:method :host :ssh-host :localname) for current TRAMP buffer, or nil."
+(defun my/tramp-info ()
+  "Return plist (:method :host :localname) for current TRAMP buffer, or nil."
   (when (file-remote-p default-directory)
     (let* ((vec       (tramp-dissect-file-name default-directory))
            (method    (tramp-file-name-method vec))
            (host      (tramp-file-name-host vec))
-           (localname (tramp-file-name-localname vec))
-           (hop       (when (fboundp 'tramp-file-name-hop)
-                        (tramp-file-name-hop vec)))
-           (ssh-host  (cond
-                       ((and hop (string-match "ssh" hop))
-                        (tramp-file-name-host
-                         (tramp-dissect-file-name (concat hop "/"))))
-                       ((equal method "ssh") host))))
-      (list :method method :host host :ssh-host ssh-host :localname localname))))
+           (localname (tramp-file-name-localname vec)))
+      (list :method method :host host :localname localname))))
 
 (defun my/tmux-session-name (&optional tramp-info)
   "Return tmux session name based on current project or directory.
@@ -203,29 +197,30 @@ Optionally accepts pre-computed TRAMP-INFO plist to avoid redundant parsing."
 
 (defun my/vterm-tmux ()
   "Open vterm and attach to tmux session, local or remote.
-If inside a docker container, the tmux session launches into it."
+If inside a docker container, exits the container first then runs tmux."
   (interactive)
   (unless (fboundp 'vterm)
-    (user-error "vtermがインストールされていません: M-x package-install RET vterm"))
+    (user-error "vterm is not installed: M-x package-install RET vterm"))
   (let* ((info      (my/tramp-info))
          (session   (my/tmux-session-name info))
-         (ssh-host  (plist-get info :ssh-host))
          (container (when (equal (plist-get info :method) "docker")
                       (plist-get info :host)))
          (tmux-cmd  (my/tmux-command session container))
-         (buf-name  (format "*vterm:%s%s*"
-                            (if ssh-host (concat ssh-host ":") "")
-                            session)))
+         (buf-name  (format "*vterm:%s*" session)))
     (if (get-buffer buf-name)
         (switch-to-buffer buf-name)
       (let ((buf (vterm buf-name)))
         (run-with-timer 0.5 nil
                         (lambda ()
                           (with-current-buffer buf
-                            (vterm-send-string
-                             (if ssh-host
-                                 (format "ssh %s -t \"%s\"\n" ssh-host tmux-cmd)
-                               (format "%s\n" tmux-cmd))))))))))
+                            (if container
+                                (progn
+                                  (vterm-send-string "exit\n")
+                                  (run-with-timer 0.5 nil
+                                                  (lambda ()
+                                                    (with-current-buffer buf
+                                                      (vterm-send-string (format "%s\n" tmux-cmd))))))
+                              (vterm-send-string (format "%s\n" tmux-cmd)))))))))))
 
 (global-set-key (kbd "C-c t") #'my/vterm-tmux)
 
