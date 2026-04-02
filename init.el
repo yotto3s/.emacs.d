@@ -108,7 +108,8 @@
   (org-hide-leading-stars t)
   (org-log-done 'time)
   (org-todo-keywords
-   '((sequence "TODO(t)" "IN-PROGRESS(i)" "WAITING(w)" "|" "DONE(d)" "CANCELLED(c)")))
+   '((sequence "TODO(t)" "IN-PROGRESS(p)" "WAITING(w)" "|" "DONE(d)" "CANCELLED(c)")
+     (sequence "IDEA(i)" "|" "CANCELLED(c)")))
   (org-capture-templates
    '(("t" "Task"    entry (file (lambda () (my/org-daily-file)))
       "* TODO %?\n  SCHEDULED: %t\n  %U\n")
