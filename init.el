@@ -93,6 +93,7 @@
            "-o ControlPath=/tmp/tramp.%%r@%%h:%%p "
            "-o ControlPersist=yes"))
   (tramp-remote-path '(tramp-own-remote-path tramp-default-remote-path))
+  (tramp-show-ad-hoc-proxies t)
   :config (setq tramp-verbose 2)) ; M-x tramp-cleanup-all-connections to reset
 
 ;;; Org
@@ -160,69 +161,6 @@
   :custom
   (vterm-max-scrollback 10000)
   (vterm-shell "/bin/bash"))
-
-(defun my/tramp-info ()
-  "Return plist (:method :host :localname) for current TRAMP buffer, or nil."
-  (when (file-remote-p default-directory)
-    (let* ((vec       (tramp-dissect-file-name default-directory))
-           (method    (tramp-file-name-method vec))
-           (host      (tramp-file-name-host vec))
-           (localname (tramp-file-name-localname vec)))
-      (list :method method :host host :localname localname))))
-
-(defun my/tmux-session-name (&optional tramp-info)
-  "Return tmux session name based on current project or directory.
-For remote buffers, uses the path on the remote machine only.
-Optionally accepts pre-computed TRAMP-INFO plist to avoid redundant parsing."
-  (let* ((info  (or tramp-info (my/tramp-info)))
-         (root  (if-let (project (project-current))
-                    (project-root project)
-                  default-directory))
-         (path  (directory-file-name
-                 (if info
-                     (tramp-file-name-localname
-                      (tramp-dissect-file-name root))
-                   (expand-file-name root))))
-         (name  (replace-regexp-in-string "[[:space:]]" "_"
-                 (replace-regexp-in-string "/" "-" path))))
-    (if (string-empty-p name) "default" (string-trim-left name "-"))))
-
-(defun my/tmux-command (session container)
-  "Build tmux new-session command, optionally launching into CONTAINER."
-  (if container
-      (format "tmux new-session -A -s %s 'docker exec -it %s bash'"
-              session container)
-    (format "tmux new-session -A -s %s" session)))
-
-(defun my/vterm-tmux ()
-  "Open vterm and attach to tmux session, local or remote.
-If inside a docker container, exits the container first then runs tmux."
-  (interactive)
-  (unless (fboundp 'vterm)
-    (user-error "vtermがインストールされていません: M-x package-install RET vterm"))
-  (let* ((info      (my/tramp-info))
-         (session   (my/tmux-session-name info))
-         (container (when (equal (plist-get info :method) "docker")
-                      (plist-get info :host)))
-         (tmux-cmd  (my/tmux-command session container))
-         (buf-name  (format "*vterm:%s*" session)))
-    (if (get-buffer buf-name)
-        (switch-to-buffer buf-name)
-      (let ((buf (vterm buf-name)))
-        (run-with-timer 0.5 nil
-                        (lambda ()
-                          (with-current-buffer buf
-                            (if container
-                                (progn
-                                  (vterm-send-string "exit\n")
-                                  (run-with-timer 0.5 nil
-                                                  (lambda ()
-                                                    (with-current-buffer buf
-                                                      (vterm-send-string (format "%s\n" tmux-cmd))))))
-                              (vterm-send-string (format "%s\n" tmux-cmd)))))))))))
-
-(global-set-key (kbd "C-c t") #'my/vterm-tmux)
-
 ;;; Tab bar
 
 (use-package tab-bar
