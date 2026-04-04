@@ -104,6 +104,12 @@
   (org-directory "~/orgfiles")
   (org-default-notes-file "~/orgfiles/inbox.org")
   (org-agenda-files '("~/orgfiles/daily/" "~/orgfiles/inbox.org"))
+  (org-refile-targets
+   '((nil :maxlevel . 3)                 ; current file, up to 3 levels deep
+     (org-agenda-files :maxlevel . 2)))  ; all agenda files
+  (org-refile-use-outline-path 'file)
+  (org-outline-path-complete-in-steps nil)
+  (org-refile-allow-creating-parent-nodes 'confirm)
   (org-startup-indented t)
   (org-hide-leading-stars t)
   (org-log-done 'time)
@@ -111,9 +117,9 @@
    '((sequence "TODO(t)" "IN-PROGRESS(p)" "WAITING(w)" "|" "DONE(d)" "CANCELLED(c)")
      (sequence "IDEA(i)" "|" "CANCELLED(c)")))
   (org-capture-templates
-   '(("t" "Task"    entry (file (lambda () (my/org-daily-file)))
+   '(("t" "Task"    entry (file+headline (lambda () (my/org-daily-file)) "Tasks")
       "* TODO %?\n  SCHEDULED: %t\n  %U\n")
-     ("m" "Memo"    entry (file (lambda () (my/org-daily-file)))
+     ("m" "Memo"    entry (file+headline (lambda () (my/org-daily-file)) Notes)
       "* %?\n  %U\n")
      ("b" "Backlog" entry (file+headline "~/orgfiles/inbox.org" "Backlog")
       "* TODO %?\n  %U\n")
