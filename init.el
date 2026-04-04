@@ -101,9 +101,9 @@
 (use-package org
   :ensure nil
   :custom
-  (org-directory "~/orgfiles")
-  (org-default-notes-file "~/orgfiles/inbox.org")
-  (org-agenda-files '("~/orgfiles/daily/" "~/orgfiles/inbox.org"))
+  (org-directory "~/gdrive/orgfiles")
+  (org-default-notes-file "~/gdrive/orgfiles/inbox.org")
+  (org-agenda-files '("~/gdrive/orgfiles/daily/" "~/gdrive/orgfiles/inbox.org"))
   (org-startup-indented t)
   (org-hide-leading-stars t)
   (org-log-done 'time)
@@ -115,9 +115,9 @@
       "* TODO %?\n  SCHEDULED: %t\n  %U\n")
      ("m" "Memo"    entry (file (lambda () (my/org-daily-file)))
       "* %?\n  %U\n")
-     ("b" "Backlog" entry (file+headline "~/orgfiles/inbox.org" "Backlog")
+     ("b" "Backlog" entry (file+headline "~/gdrive/orgfiles/inbox.org" "Backlog")
       "* TODO %?\n  %U\n")
-     ("i" "Idea"    entry (file+headline "~/orgfiles/inbox.org" "Ideas")
+     ("i" "Idea"    entry (file+headline "~/gdrive/orgfiles/inbox.org" "Ideas")
       "* IDEA %?\n  %U\n")))
   :bind (("C-c a" . org-agenda)
          ("C-c c" . org-capture)
