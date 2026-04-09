@@ -29,3 +29,6 @@ custom.el
 *~
 \#*\#
 .\#*
+
+# Org-roam
+org-roam.db
