@@ -102,8 +102,9 @@
   :ensure nil
   :custom
   (org-directory "~/orgfiles")
-  (org-default-notes-file "~/orgfiles/inbox.org")
-  (org-agenda-files '("~/orgfiles/daily/" "~/orgfiles/inbox.org"))
+  (org-default-notes-file (expand-file-name "inbox.org" org-directory))
+  (org-agenda-files (list (expand-file-name "daily/" org-directory)
+                          (expand-file-name "inbox.org" org-directory)))
   (org-refile-targets
    '((nil :maxlevel . 3)                 ; current file, up to 3 levels deep
      (org-agenda-files :maxlevel . 2)))  ; all agenda files
@@ -121,9 +122,9 @@
       "* TODO %?\n  SCHEDULED: %t\n  %U\n")
      ("m" "Memo"    entry (file+headline (lambda () (my/org-daily-file)) Notes)
       "* %?\n  %U\n")
-     ("b" "Backlog" entry (file+headline "~/orgfiles/inbox.org" "Backlog")
+     ("b" "Backlog" entry (file+headline org-default-notes-file "Backlog")
       "* TODO %?\n  %U\n")
-     ("i" "Idea"    entry (file+headline "~/orgfiles/inbox.org" "Ideas")
+     ("i" "Idea"    entry (file+headline org-default-notes-file "Ideas")
       "* IDEA %?\n  %U\n")))
   :bind (("C-c a" . org-agenda)
          ("C-c c" . org-capture)
