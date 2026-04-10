@@ -1,4 +1,4 @@
-# org-roam MCP Server 仕様書
+# org-files MCP Server 仕様書
 
 ## 概要
 

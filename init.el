@@ -103,8 +103,8 @@
   :custom
   (org-directory "~/orgfiles")
   (org-default-notes-file (expand-file-name "inbox.org" org-directory))
-  (org-agenda-files (list (expand-file-name "daily/" org-directory)
-                          (expand-file-name "inbox.org" org-directory)))
+  (org-agenda-files (list (expand-file-name "inbox.org" org-directory)))
+  (org-archive-location "::* Archive")
   (org-refile-targets
    '((nil :maxlevel . 3)                 ; current file, up to 3 levels deep
      (org-agenda-files :maxlevel . 2)))  ; all agenda files
@@ -115,13 +115,12 @@
   (org-hide-leading-stars t)
   (org-log-done 'time)
   (org-todo-keywords
-   '((sequence "TODO(t)" "IN-PROGRESS(p)" "WAITING(w)" "|" "DONE(d)" "CANCELLED(c)")
-     (sequence "IDEA(i)" "|" "CANCELLED(c)")))
+   '((sequence "TODO(t)" "IN-PROGRESS(p)" "WAITING(w)" "|" "DONE(d)" "CANCELLED(c)")))
   (org-capture-templates
-   '(("b" "Backlog" entry (file+headline org-default-notes-file "Backlog")
+   '(("t" "Task" entry (file org-default-notes-file)
       "* TODO %?\n  %U\n")
-     ("i" "Idea"    entry (file+headline org-default-notes-file "Ideas")
-      "* IDEA %?\n  %U\n")))
+     ("m" "Memo" entry (file "refile.org")
+      "* %?\n  %U\n")))
   :bind (("C-c a" . org-agenda)
          ("C-c c" . org-capture)
          ("C-c l" . org-store-link)))
@@ -130,34 +129,13 @@
 
 (use-package org-roam
   :custom
-  (org-roam-directory (expand-file-name "~/orgfiles"))
+  (org-roam-directory (expand-file-name "roam/" org-directory))
   (org-roam-db-location (expand-file-name "org-roam.db" user-emacs-directory))
   (org-roam-completion-everywhere t)
-  (org-roam-dailies-directory "daily/")
-  (org-roam-dailies-capture-templates
-   '(("d" "default" entry "* %?"
-      :target (file+head "%<%Y-%m-%d>.org"
-                          "#+TITLE: %<%Y-%m-%d>\n#+DATE: %<%Y-%m-%d>\n#+FILETAGS: :daily:\n\n* Tasks\n\n* Notes\n\n* Journal\n"))
-     ("t" "task" entry "* TODO %?\n  SCHEDULED: %t\n  %U"
-      :target (file+head "%<%Y-%m-%d>.org"
-                          "#+TITLE: %<%Y-%m-%d>\n#+DATE: %<%Y-%m-%d>\n#+FILETAGS: :daily:\n\n* Tasks\n\n* Notes\n\n* Journal\n")
-      :olp ("Tasks"))
-     ("j" "journal" entry "* %<%H:%M> %?"
-      :target (file+head "%<%Y-%m-%d>.org"
-                          "#+TITLE: %<%Y-%m-%d>\n#+DATE: %<%Y-%m-%d>\n#+FILETAGS: :daily:\n\n* Tasks\n\n* Notes\n\n* Journal\n")
-      :olp ("Journal"))))
   (org-roam-capture-templates
    '(("d" "default" plain "%?"
       :target (file+head "%<%Y%m%d%H%M%S>-${slug}.org"
                           "#+TITLE: ${title}\n#+DATE: %U\n#+FILETAGS:\n")
-      :unnarrowed t)
-     ("r" "reference" plain "%?"
-      :target (file+head "ref/%<%Y%m%d%H%M%S>-${slug}.org"
-                          "#+TITLE: ${title}\n#+DATE: %U\n#+FILETAGS: :reference:\n\n* Source\n\n* Notes\n")
-      :unnarrowed t)
-     ("p" "project" plain "%?"
-      :target (file+head "project/%<%Y%m%d%H%M%S>-${slug}.org"
-                          "#+TITLE: ${title}\n#+DATE: %U\n#+FILETAGS: :project:\n\n* Goals\n\n* Tasks\n\n* Notes\n")
       :unnarrowed t)))
   :bind (("C-c n f" . org-roam-node-find)
          ("C-c n i" . org-roam-node-insert)
@@ -165,14 +143,9 @@
          ("C-c n c" . org-roam-capture)
          ("C-c n t" . org-roam-tag-add)
          ("C-c n a" . org-roam-alias-add)
-         ("C-c n d" . org-roam-dailies-goto-today)
-         ("C-c n D" . org-roam-dailies-goto-date)
-         ("C-c n j" . org-roam-dailies-capture-today)
-         ("C-c n y" . org-roam-dailies-goto-yesterday)
          ("C-c n g" . org-roam-graph))
   :config
-  (org-roam-db-autosync-mode)
-  (add-hook 'emacs-startup-hook #'org-roam-dailies-goto-today))
+  (org-roam-db-autosync-mode))
 
 (use-package org-roam-ui
   :after org-roam
