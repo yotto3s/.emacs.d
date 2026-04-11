@@ -107,7 +107,8 @@
   (org-archive-location "::* Archive")
   (org-refile-targets
    '((nil :maxlevel . 3)                 ; current file, up to 3 levels deep
-     (org-agenda-files :maxlevel . 2)))  ; all agenda files
+     (org-agenda-files :maxlevel . 2)    ; all agenda files
+     (org-roam-list-files :maxlevel . 2))) ; all org-roam files
   (org-refile-use-outline-path 'file)
   (org-outline-path-complete-in-steps nil)
   (org-refile-allow-creating-parent-nodes 'confirm)
@@ -141,6 +142,7 @@
          ("C-c n i" . org-roam-node-insert)
          ("C-c n l" . org-roam-buffer-toggle)
          ("C-c n c" . org-roam-capture)
+         ("C-c n e" . org-roam-extract-subtree)
          ("C-c n t" . org-roam-tag-add)
          ("C-c n a" . org-roam-alias-add)
          ("C-c n g" . org-roam-graph))
