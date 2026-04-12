@@ -48,7 +48,9 @@
 
 (use-package corfu
   :custom
-  (corfu-auto nil)
+  (corfu-auto t)
+  (corfu-auto-delay 0.2)
+  (corfu-auto-prefix 2)
   (corfu-cycle t)
   (corfu-quit-no-match t)
   :bind (:map corfu-map
@@ -219,6 +221,25 @@
   :hook
   (c++-mode . (lambda () (local-set-key (kbd "C-c F") #'clang-format-buffer)))
   (python-mode . (lambda () (local-set-key (kbd "C-c F") #'black-format-buffer))))
+
+;;; LSP (Eglot)
+
+(use-package eglot
+  :ensure nil
+  :hook
+  (python-mode . eglot-ensure)
+  (c++-mode . eglot-ensure)
+  (c-mode . eglot-ensure)
+  :bind (:map eglot-mode-map
+              ("C-c e r" . eglot-rename)
+              ("C-c e a" . eglot-code-actions)
+              ("C-c e f" . eglot-format)))
+
+;;; Common Lisp (Sly)
+
+(use-package sly
+  :custom
+  (inferior-lisp-program "ros -Q run"))
 
 ;;; Magit
 

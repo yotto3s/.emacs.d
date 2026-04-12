@@ -2,7 +2,7 @@
 
 ;; Copyright (C) 2026
 
-;; Version: 0.4.0
+;; Version: 0.5.0
 ;; Package-Requires: ((emacs "29.1") (org-roam "2.2.2"))
 ;; Keywords: org, org-roam, mcp, ai
 
@@ -11,14 +11,14 @@
 ;; An MCP (Model Context Protocol) server that runs inside Emacs,
 ;; providing AI agents with structured access to the user's org files.
 ;;
-;; Access model:
-;;   - Files under `org-roam-directory' are READ-ONLY.  Agents query
-;;     them via the `roam_*' tool family (list/get/backlinks/graph/search).
-;;   - Files under `org-directory' but outside `org-roam-directory' are
-;;     WRITABLE via the `org_*' tool family.  Targets are addressed by
-;;     (file, olp) pairs, where `file' is a path relative to
-;;     `org-directory' and `olp' is a list of heading titles matching
-;;     `org-find-olp's convention.  No `:ID:' properties are written.
+;; Access model (split by intent, not by location):
+;;   - `roam_*' tools own general org file editing and searching.
+;;     Roam nodes are addressed by id or title; content, tags, and
+;;     properties can be read and mutated.
+;;   - `org_*'  tools own TODO management.  They only accept files
+;;     that are members of `org-agenda-files' (currently just
+;;     `inbox.org').  Refile.org, archive files, and roam files are
+;;     rejected at the resolver layer.
 ;;
 ;; Transport: stdio (newline-delimited JSON-RPC 2.0)
 ;; Protocol: MCP 2024-11-05
@@ -29,8 +29,8 @@
 ;;
 ;; Layout:
 ;;   org-files-mcp.el       — core: transport, dispatch, schemas, helpers
-;;   org-files-mcp-roam.el  — roam_* read-only tools
-;;   org-files-mcp-org.el   — org_*  plain-org read + write tools
+;;   org-files-mcp-roam.el  — roam_* read + write tools
+;;   org-files-mcp-org.el   — org_*  TODO-management tools (agenda files)
 
 ;;; Code:
 
@@ -54,8 +54,14 @@
   :group 'org-files-mcp)
 
 (defconst org-files-mcp--server-name "org-files-mcp")
-(defconst org-files-mcp--server-version "0.4.0")
+(defconst org-files-mcp--server-version "0.5.1")
 (defconst org-files-mcp--protocol-version "2024-11-05")
+
+(defconst org-files-mcp--ai-tag "ai_generated"
+  "Tag applied by content-creating MCP writes to mark AI-authored content.
+Added by `roam_create_node', `roam_append_to_node',
+`roam_update_node_body', and `org_add_todo'.  `roam_remove_tag' and
+`org_remove_tag' refuse to remove it.")
 
 ;; ============================================================
 ;; Logging (stderr only — stdout is the transport)
@@ -146,40 +152,6 @@ If HEADING-SHIFT is a positive integer, adds --shift-heading-level-by=N."
 ;; Path / target resolvers (shared across tool modules)
 ;; ============================================================
 
-(defun org-files-mcp--file-in-roam-p (abs-file)
-  "Return non-nil if ABS-FILE is within `org-roam-directory'."
-  (and (boundp 'org-roam-directory)
-       org-roam-directory
-       (file-in-directory-p abs-file (expand-file-name org-roam-directory))))
-
-(defun org-files-mcp--resolve-existing-file (file)
-  "Resolve FILE (relative to `org-directory') to an absolute path for read/write.
-Signals if FILE is not an org file, is inside `org-roam-directory',
-or does not exist."
-  (let ((abs (expand-file-name file (or org-directory default-directory))))
-    (unless (string-suffix-p ".org" abs)
-      (error "Not an org file (must end in .org): %s" file))
-    (when (org-files-mcp--file-in-roam-p abs)
-      (error "File is inside org-roam-directory (read-only via this server): %s" file))
-    (unless (file-exists-p abs)
-      (error "File not found: %s" file))
-    abs))
-
-(defun org-files-mcp--resolve-new-file (file)
-  "Resolve FILE (relative to `org-directory') to an absolute path for a NEW file.
-Signals if the path is inside `org-roam-directory', the file already
-exists, the extension isn't .org, or the parent directory is missing."
-  (let ((abs (expand-file-name file (or org-directory default-directory))))
-    (unless (string-suffix-p ".org" abs)
-      (error "New file must have .org extension: %s" file))
-    (when (org-files-mcp--file-in-roam-p abs)
-      (error "Target is inside org-roam-directory (read-only via this server): %s" file))
-    (when (file-exists-p abs)
-      (error "File already exists: %s" file))
-    (unless (file-directory-p (file-name-directory abs))
-      (error "Parent directory does not exist: %s" (file-name-directory abs)))
-    abs))
-
 (defun org-files-mcp--olp-to-list (olp)
   "Coerce OLP (vector or list from JSON) to a plain list."
   (cond ((null olp) nil)
@@ -187,16 +159,42 @@ exists, the extension isn't .org, or the parent directory is missing."
         ((listp olp) olp)
         (t (error "olp must be a list of heading titles"))))
 
-(defun org-files-mcp--resolve-olp (file olp)
-  "Resolve (FILE, OLP) to a plain-org heading target plist.
-FILE is a path relative to `org-directory'.  OLP must be a non-empty
-list (or vector) of heading titles from outermost to innermost.
-Returns a plist (:file ABS :point POS :level LEVEL :tags TAGS).
-Signals on bad file, read-only file, empty olp, or heading not found."
+(defun org-files-mcp--child-level (parent-level)
+  "Return the heading level for a child of a node at PARENT-LEVEL.
+File-level (0) children become level 1."
+  (if (= parent-level 0) 1 (1+ parent-level)))
+
+;; ============================================================
+;; Agenda-file resolvers (TODO tools use these)
+;; ============================================================
+
+(defun org-files-mcp--agenda-files-absolute ()
+  "Return `org-agenda-files' as a list of absolute, canonicalized paths."
+  (mapcar (lambda (f) (expand-file-name f))
+          (org-agenda-files t)))
+
+(defun org-files-mcp--resolve-agenda-file (file)
+  "Resolve FILE and verify it is a member of `org-agenda-files'.
+FILE may be either a path relative to `org-directory' or an absolute
+path.  Signals if the resolved file is not in `org-agenda-files'."
+  (let* ((abs (expand-file-name file (or org-directory default-directory)))
+         (agenda (org-files-mcp--agenda-files-absolute)))
+    (unless (string-suffix-p ".org" abs)
+      (error "Not an org file (must end in .org): %s" file))
+    (unless (member abs agenda)
+      (error "File is not in `org-agenda-files' (TODO tools only operate on agenda files): %s"
+             file))
+    (unless (file-exists-p abs)
+      (error "File not found: %s" file))
+    abs))
+
+(defun org-files-mcp--resolve-olp-agenda (file olp)
+  "Like `--resolve-olp' but requires FILE to be in `org-agenda-files'.
+Returns a plist (:file ABS :point POS :level LEVEL :tags TAGS)."
   (let ((olp-list (org-files-mcp--olp-to-list olp)))
     (unless (and olp-list (> (length olp-list) 0))
       (error "olp must be a non-empty list of heading titles"))
-    (let* ((abs (org-files-mcp--resolve-existing-file file))
+    (let* ((abs (org-files-mcp--resolve-agenda-file file))
            (marker (condition-case err
                        (org-find-olp (cons abs olp-list))
                      (error
@@ -211,11 +209,6 @@ Signals on bad file, read-only file, empty olp, or heading not found."
                 :point (marker-position marker)
                 :level (or (org-current-level) 0)
                 :tags  (or (org-get-tags nil t) '())))))))
-
-(defun org-files-mcp--child-level (parent-level)
-  "Return the heading level for a child of a node at PARENT-LEVEL.
-File-level (0) children become level 1."
-  (if (= parent-level 0) 1 (1+ parent-level)))
 
 (defun org-files-mcp--archive-heading-regexp ()
   "Return a regexp matching the archive heading in the current file.
@@ -267,6 +260,237 @@ Returns the next state in the cycle, or nil if CURRENT-STATE is the last."
          (pos (cl-position current-state keywords :test #'equal)))
     (when pos
       (nth (1+ pos) keywords))))
+
+;; ============================================================
+;; Roam write helpers (shared by roam_* write tools)
+;; ============================================================
+
+(defun org-files-mcp--roam-resolve-node (id title)
+  "Resolve a roam node by ID or TITLE, returning an `org-roam-node' struct.
+Signals if neither is provided or the node does not exist."
+  (cond
+   (id
+    (or (org-roam-node-from-id id)
+        (error "Roam node not found: %s" id)))
+   (title
+    (let ((rows (org-roam-db-query
+                 [:select [id] :from nodes
+                  :where (= title $s1)
+                  :limit 1]
+                 title)))
+      (if rows
+          (or (org-roam-node-from-id (caar rows))
+              (error "Roam node not found after DB hit: %s" title))
+        (error "Roam node not found with title: %s" title))))
+   (t (error "Either id or title is required"))))
+
+(defun org-files-mcp--roam-after-write (abs-file)
+  "Refresh the roam DB entry for ABS-FILE after a write."
+  (when (and (boundp 'org-roam-directory) org-roam-directory
+             (file-in-directory-p abs-file
+                                  (expand-file-name org-roam-directory)))
+    (condition-case err
+        (org-roam-db-update-file abs-file)
+      (error
+       (org-files-mcp--log "WARNING: org-roam-db-update-file failed for %s: %s"
+                           abs-file (error-message-string err))))))
+
+(defun org-files-mcp--slugify (title)
+  "Return a filesystem-safe slug for TITLE."
+  (let* ((s (downcase (or title "")))
+         (s (replace-regexp-in-string "[^a-z0-9]+" "_" s))
+         (s (replace-regexp-in-string "\\`_+\\|_+\\'" "" s)))
+    (if (string-empty-p s) "untitled" s)))
+
+(defun org-files-mcp--roam-new-filename (title &optional override)
+  "Return an absolute path for a new roam node with TITLE.
+If OVERRIDE is provided, use that (as a relative name inside
+`org-roam-directory').  Otherwise auto-generate `YYYYMMDDHHMMSS-slug.org'."
+  (let* ((dir (expand-file-name org-roam-directory))
+         (rel (or override
+                  (format "%s-%s.org"
+                          (format-time-string "%Y%m%d%H%M%S")
+                          (org-files-mcp--slugify title))))
+         (abs (expand-file-name rel dir)))
+    (unless (string-suffix-p ".org" abs)
+      (error "New roam filename must end in .org: %s" rel))
+    (unless (file-in-directory-p abs dir)
+      (error "New roam filename escapes org-roam-directory: %s" rel))
+    (when (file-exists-p abs)
+      (error "Roam file already exists: %s" rel))
+    abs))
+
+(defun org-files-mcp--roam-file-header-end ()
+  "Move point past the leading file header block in the current buffer.
+A file header consists of the top-level `:PROPERTIES: … :END:' drawer
+followed by any contiguous `#+KEY:' keyword lines and blank lines.
+After return, point is at the start of the first body line (or eob)."
+  (goto-char (point-min))
+  ;; Skip top-level PROPERTIES drawer if present
+  (when (looking-at-p "^[ \t]*:PROPERTIES:[ \t]*$")
+    (when (re-search-forward "^[ \t]*:END:[ \t]*$" nil t)
+      (forward-line 1)))
+  ;; Skip contiguous #+KEYWORD: lines and blank lines
+  (while (and (not (eobp))
+              (looking-at-p "^\\(#\\+[^:\n]+:.*\\|[ \t]*\\)$")
+              (not (looking-at-p "^\\*")))
+    (forward-line 1)))
+
+(defun org-files-mcp--roam-file-filetags-parse (line)
+  "Parse a `#+filetags:' LINE value into a list of tag strings.
+LINE is the text AFTER `#+filetags:'.  Handles both `:a:b:c:' and space
+separated forms."
+  (let* ((val (string-trim line)))
+    (cond
+     ((string-empty-p val) nil)
+     ((string-match-p "^:.*:$" val)
+      (split-string val ":" t))
+     (t (split-string val "[ \t]+" t)))))
+
+(defun org-files-mcp--roam-file-filetags-format (tags)
+  "Format TAGS as a `#+filetags:' value in `:a:b:' form."
+  (if (null tags) ""
+    (concat ":" (mapconcat #'identity tags ":") ":")))
+
+(defun org-files-mcp--roam-file-filetags-edit (op tag)
+  "Add or remove TAG in the current buffer's `#+filetags:' line.
+OP is either `add' or `remove'.  Inserts the keyword line after the
+top header block if absent.  Assumes the buffer is already visiting
+the target file and will be saved by the caller."
+  (save-excursion
+    (goto-char (point-min))
+    (if (re-search-forward "^[ \t]*#\\+filetags:[ \t]*\\(.*\\)$" nil t)
+        (let* ((line-start (match-beginning 0))
+               (line-end (match-end 0))
+               (val (match-string 1))
+               (tags (org-files-mcp--roam-file-filetags-parse val))
+               (new-tags (pcase op
+                           ('add (if (member tag tags) tags
+                                   (append tags (list tag))))
+                           ('remove (delete tag (copy-sequence tags)))
+                           (_ (error "Invalid op: %S" op)))))
+          (delete-region line-start line-end)
+          (goto-char line-start)
+          (if new-tags
+              (insert "#+filetags: "
+                      (org-files-mcp--roam-file-filetags-format new-tags))
+            ;; If we emptied the tag set, drop the line entirely.
+            (when (looking-at-p "\n") (delete-char 1))))
+      ;; No existing filetags line — only meaningful for `add'.
+      (when (eq op 'add)
+        (org-files-mcp--roam-file-header-end)
+        ;; Insert just before the first body line.  Place on its own
+        ;; line, above any blank line that already separates header
+        ;; from body.
+        (goto-char (line-beginning-position))
+        (insert "#+filetags: "
+                (org-files-mcp--roam-file-filetags-format (list tag))
+                "\n")))))
+
+(defun org-files-mcp--mark-file-ai-generated ()
+  "Ensure the current buffer's `#+filetags:' contains `org-files-mcp--ai-tag'.
+Buffer must be visiting the target file; caller is responsible for
+saving.  Idempotent: no-op if the tag is already present."
+  (save-excursion
+    (widen)
+    (org-files-mcp--roam-file-filetags-edit 'add org-files-mcp--ai-tag)))
+
+(defun org-files-mcp--replace-subtree-body-at-point (org-body mode)
+  "Replace the body of the org subtree at point with ORG-BODY.
+MODE is \"replace\", \"append\", or \"prepend\".  Assumes point is at
+the heading line.  Body is the region between `org-end-of-meta-data'
+and the next heading or eob.  Does NOT save the buffer."
+  (save-restriction
+    (org-narrow-to-subtree)
+    (goto-char (point-min))
+    (forward-line 1)
+    (org-end-of-meta-data t)
+    (let ((body-start (point))
+          (body-end (save-excursion
+                      (or (outline-next-heading) (goto-char (point-max)))
+                      (point))))
+      (pcase mode
+        ("replace"
+         (delete-region body-start body-end)
+         (goto-char body-start)
+         (insert org-body)
+         (unless (string-suffix-p "\n" org-body) (insert "\n")))
+        ("append"
+         (goto-char body-end)
+         (insert org-body)
+         (unless (string-suffix-p "\n" org-body) (insert "\n")))
+        ("prepend"
+         (goto-char body-start)
+         (insert org-body)
+         (unless (string-suffix-p "\n" org-body) (insert "\n")))
+        (_ (error "Invalid mode: '%s'" mode))))))
+
+(defun org-files-mcp--replace-file-body (org-body mode)
+  "Replace file-level body (below header block) of the current buffer.
+MODE is \"replace\", \"append\", or \"prepend\".  The header block is
+anything skipped by `--roam-file-header-end'.  Does NOT save the buffer."
+  (save-excursion
+    (org-files-mcp--roam-file-header-end)
+    (let ((body-start (point))
+          (body-end (point-max)))
+      (pcase mode
+        ("replace"
+         (delete-region body-start body-end)
+         (goto-char body-start)
+         (insert org-body)
+         (unless (string-suffix-p "\n" org-body) (insert "\n")))
+        ("append"
+         (goto-char body-end)
+         (unless (bolp) (insert "\n"))
+         (insert org-body)
+         (unless (string-suffix-p "\n" org-body) (insert "\n")))
+        ("prepend"
+         (goto-char body-start)
+         (insert org-body)
+         (unless (string-suffix-p "\n" org-body) (insert "\n")))
+        (_ (error "Invalid mode: '%s'" mode))))))
+
+(defun org-files-mcp--roam-file-level-property-edit (op name &optional value)
+  "Edit a property on the file-level PROPERTIES drawer of the current buffer.
+OP is `set' or `remove'.  For `set' pass VALUE.  Rejects NAME = \"ID\"."
+  (when (equal (upcase name) "ID")
+    (error "Refusing to modify :ID: on a roam node"))
+  (save-excursion
+    (goto-char (point-min))
+    (cond
+     ;; No drawer at all
+     ((not (looking-at-p "^[ \t]*:PROPERTIES:[ \t]*$"))
+      (pcase op
+        ('set
+         (goto-char (point-min))
+         (insert ":PROPERTIES:\n:" name ": " value "\n:END:\n"))
+        ('remove nil)))
+     ;; Drawer present — walk its lines
+     (t
+      (let* ((drawer-end-line
+              (save-excursion
+                (re-search-forward "^[ \t]*:END:[ \t]*$" nil t)
+                (line-beginning-position)))
+             (prop-re (format "^[ \t]*:%s:[ \t]+\\(.*\\)$" (regexp-quote name))))
+        (forward-line 1)
+        (let ((found nil))
+          (while (and (not found) (< (point) drawer-end-line))
+            (if (looking-at prop-re)
+                (setq found (point))
+              (forward-line 1)))
+          (pcase op
+            ('set
+             (if found
+                 (progn
+                   (delete-region (line-beginning-position) (line-end-position))
+                   (insert ":" name ": " value))
+               (goto-char drawer-end-line)
+               (insert ":" name ": " value "\n")))
+            ('remove
+             (when found
+               (goto-char found)
+               (delete-region (line-beginning-position)
+                              (progn (forward-line 1) (point))))))))))))
 
 ;; ============================================================
 ;; Batch-safe agenda scanning helpers
@@ -368,6 +592,15 @@ Returns nil if TS is nil."
 ;; Load tool modules
 ;; ============================================================
 
+;; Ensure the submodules in this file's directory are findable even
+;; when the server is launched via `emacs -l /absolute/path/org-files-mcp.el'
+;; (which does not automatically add the directory to `load-path').
+(let ((this-dir (file-name-directory
+                 (or load-file-name buffer-file-name
+                     (locate-library "org-files-mcp")))))
+  (when this-dir
+    (add-to-list 'load-path this-dir)))
+
 (require 'org-files-mcp-roam)
 (require 'org-files-mcp-org)
 
@@ -379,32 +612,29 @@ Returns nil if TS is nil."
   "Dispatch tool NAME with ARGS. Return MCP tool result alist."
   (condition-case err
       (pcase name
-        ;; ---- Roam (read-only) ----
+        ;; ---- Roam: read ----
         ("roam_list_nodes"          (org-files-mcp--tool-roam-list-nodes args))
         ("roam_get_node"            (org-files-mcp--tool-roam-get-node args))
         ("roam_get_backlinks"       (org-files-mcp--tool-roam-get-backlinks args))
         ("roam_get_graph"           (org-files-mcp--tool-roam-get-graph args))
         ("roam_search_nodes"        (org-files-mcp--tool-roam-search-nodes args))
-        ;; ---- Plain org: file-level ----
-        ("org_create_file"          (org-files-mcp--tool-org-create-file args))
-        ("org_delete_file"          (org-files-mcp--tool-org-delete-file args))
-        ("org_rename_file"          (org-files-mcp--tool-org-rename-file args))
-        ;; ---- Plain org: heading CRUD ----
-        ("org_create_heading"       (org-files-mcp--tool-org-create-heading args))
-        ("org_append_to_heading"    (org-files-mcp--tool-org-append-to-heading args))
-        ("org_update_heading_section" (org-files-mcp--tool-org-update-heading-section args))
-        ("org_delete_heading"       (org-files-mcp--tool-org-delete-heading args))
-        ("org_rename_heading"       (org-files-mcp--tool-org-rename-heading args))
-        ("org_refile_heading"       (org-files-mcp--tool-org-refile-heading args))
-        ;; ---- Plain org: TODO / scheduling ----
+        ;; ---- Roam: content write ----
+        ("roam_create_node"         (org-files-mcp--tool-roam-create-node args))
+        ("roam_append_to_node"      (org-files-mcp--tool-roam-append-to-node args))
+        ("roam_update_node_body"    (org-files-mcp--tool-roam-update-node-body args))
+        ;; ---- Roam: metadata write ----
+        ("roam_add_tag"             (org-files-mcp--tool-roam-add-tag args))
+        ("roam_remove_tag"          (org-files-mcp--tool-roam-remove-tag args))
+        ("roam_set_property"        (org-files-mcp--tool-roam-set-property args))
+        ("roam_remove_property"     (org-files-mcp--tool-roam-remove-property args))
+        ;; ---- Plain org: TODO management (agenda files only) ----
+        ("org_add_todo"             (org-files-mcp--tool-org-add-todo args))
         ("org_toggle_todo_state"    (org-files-mcp--tool-org-toggle-todo-state args))
         ("org_set_scheduled"        (org-files-mcp--tool-org-set-scheduled args))
         ("org_set_deadline"         (org-files-mcp--tool-org-set-deadline args))
         ("org_set_property"         (org-files-mcp--tool-org-set-property args))
         ("org_add_tag"              (org-files-mcp--tool-org-add-tag args))
         ("org_remove_tag"           (org-files-mcp--tool-org-remove-tag args))
-        ;; ---- Plain org: convenience + agenda reads ----
-        ("org_add_todo"             (org-files-mcp--tool-org-add-todo args))
         ("org_list_todo_keywords"   (org-files-mcp--tool-org-list-todo-keywords args))
         ("org_agenda"               (org-files-mcp--tool-org-agenda args))
         ("org_todo_list"            (org-files-mcp--tool-org-todo-list args))
@@ -421,33 +651,33 @@ Returns nil if TS is nil."
 (defvar org-files-mcp--tool-schemas
   `[
     ;; ========================================
-    ;; Roam (read-only)
+    ;; Roam: read tools
     ;; ========================================
     ((name . "roam_list_nodes")
-     (description . "[Roam, read-only] List nodes from the org-roam database. Returns both file nodes (level=0) and heading nodes (level>=1).")
+     (description . "[Roam] List nodes from the org-roam database. Returns both file nodes (level=0) and heading nodes (level>=1).")
      (inputSchema . ((type . "object")
                      (properties . ((directory . ((type . "string") (description . "Filter by directory (relative to org-roam-directory)")))
                                     (tag . ((type . "string") (description . "Filter by tag")))
                                     (level . ((type . "integer") (description . "Filter by level (0=file, 1+=heading)")))
                                     (limit . ((type . "integer") (description . "Max results (default: 50)"))))))))
     ((name . "roam_get_node")
-     (description . "[Roam, read-only] Get roam node content by ID or title. Returns markdown or org format.")
+     (description . "[Roam] Get roam node content by ID or title. Returns markdown or org format.")
      (inputSchema . ((type . "object")
                      (properties . ((id . ((type . "string") (description . "Roam node ID")))
                                     (title . ((type . "string") (description . "Roam node title")))
                                     (format . ((type . "string") (enum . ["org" "markdown"]) (description . "Output format (default: markdown)"))))))))
     ((name . "roam_get_backlinks")
-     (description . "[Roam, read-only] Get incoming links (backlinks) for a roam node.")
+     (description . "[Roam] Get incoming links (backlinks) for a roam node.")
      (inputSchema . ((type . "object")
                      (properties . ((id . ((type . "string") (description . "Roam node ID")))))
                      (required . ["id"]))))
     ((name . "roam_get_graph")
-     (description . "[Roam, read-only] Get the link graph between roam nodes.")
+     (description . "[Roam] Get the link graph between roam nodes.")
      (inputSchema . ((type . "object")
                      (properties . ((id . ((type . "string") (description . "Origin roam node ID (omit for full graph)")))
                                     (depth . ((type . "integer") (description . "Traversal depth (default: 2)"))))))))
     ((name . "roam_search_nodes")
-     (description . "[Roam, read-only] Search roam nodes by keyword and/or attributes.")
+     (description . "[Roam] Search roam nodes by keyword and/or attributes.")
      (inputSchema . ((type . "object")
                      (properties . ((query . ((type . "string") (description . "Fulltext keyword")))
                                     (tag . ((type . "string") (description . "Filter by tag")))
@@ -456,136 +686,72 @@ Returns nil if TS is nil."
                                     (limit . ((type . "integer") (description . "Max results (default: 20)"))))))))
 
     ;; ========================================
-    ;; Plain org: file-level
+    ;; Roam: content write tools
     ;; ========================================
-    ((name . "org_create_file")
-     (description . "[Plain org] Create a new plain org file at a path relative to `org-directory'. Rejects if the path is inside `org-roam-directory' or if the file already exists. No `:ID:' property is written.")
+    ((name . "roam_create_node")
+     (description . "[Roam] Create a new file-level roam node under `org-roam-directory'. Generates a fresh `:ID:' and writes `#+title:' and optional `#+filetags:'. The filename defaults to `YYYYMMDDHHMMSS-<slug>.org'.")
      (inputSchema . ((type . "object")
-                     (properties . ((file . ((type . "string") (description . "Path relative to org-directory (must end in .org)")))
-                                    (title . ((type . "string") (description . "Optional #+title: keyword")))
-                                    (tags . ((type . "array") (items . ((type . "string"))) (description . "Optional #+filetags: tags")))
-                                    (body . ((type . "string") (description . "Optional body (Markdown; converted to org via Pandoc)")))))
-                     (required . ["file"]))))
-    ((name . "org_delete_file")
-     (description . "[Plain org] Delete a plain org file. `confirm' must be true. Rejects roam files.")
+                     (properties . ((title . ((type . "string") (description . "Node title (required)")))
+                                    (tags . ((type . "array") (items . ((type . "string"))) (description . "Filetags for the new node")))
+                                    (body . ((type . "string") (description . "Initial body content (Markdown; converted via Pandoc)")))
+                                    (filename . ((type . "string") (description . "Optional override filename (relative to org-roam-directory, must end in .org)")))))
+                     (required . ["title"]))))
+    ((name . "roam_append_to_node")
+     (description . "[Roam] Append Markdown content to an existing roam node. For file-level nodes the content is appended to end of file; for heading-level nodes, to the end of the subtree.")
      (inputSchema . ((type . "object")
-                     (properties . ((file . ((type . "string") (description . "Path relative to org-directory")))
-                                    (confirm . ((type . "boolean") (description . "Must be true")))))
-                     (required . ["file" "confirm"]))))
-    ((name . "org_rename_file")
-     (description . "[Plain org] Rename a plain org file on disk. Rejects if target is inside roam or already exists. Does not edit `#+title:` inside the file.")
+                     (properties . ((id . ((type . "string") (description . "Roam node ID (preferred)")))
+                                    (title . ((type . "string") (description . "Roam node title (used if id omitted)")))
+                                    (body . ((type . "string") (description . "Content to append (Markdown)")))))
+                     (required . ["body"]))))
+    ((name . "roam_update_node_body")
+     (description . "[Roam] Replace (or append/prepend) the body of a roam node. For file-level nodes the header block (PROPERTIES, #+title, #+filetags) is preserved; only content below it is affected.")
      (inputSchema . ((type . "object")
-                     (properties . ((file . ((type . "string") (description . "Current path, relative to org-directory")))
-                                    (new_file . ((type . "string") (description . "New path, relative to org-directory (must end in .org)")))))
-                     (required . ["file" "new_file"]))))
-
-    ;; ========================================
-    ;; Plain org: heading CRUD
-    ;; ========================================
-    ((name . "org_create_heading")
-     (description . "[Plain org] Create a new heading in a plain org file. If `parent_olp' is omitted, inserts as a top-level heading at end of file (before any archive section). No `:ID:' generated.")
-     (inputSchema . ((type . "object")
-                     (properties . ((file . ((type . "string") (description . "Path relative to org-directory")))
-                                    (parent_olp . ((type . "array") (items . ((type . "string"))) (description . "Outline path of the parent heading; omit for top-level")))
-                                    (heading . ((type . "string") (description . "Heading text")))
-                                    (state . ((type . "string") (description . "Optional TODO state keyword")))
-                                    (priority . ((type . "string") (enum . ["A" "B" "C"]) (description . "Optional priority")))
-                                    (tags . ((type . "array") (items . ((type . "string"))) (description . "Optional heading tags")))
-                                    (properties . ((type . "array") (description . "Optional property alist [[name,value],...]")))
-                                    (body . ((type . "string") (description . "Optional body (Markdown)")))))
-                     (required . ["file" "heading"]))))
-    ((name . "org_append_to_heading")
-     (description . "[Plain org] Append Markdown body to the end of a heading's subtree.")
-     (inputSchema . ((type . "object")
-                     (properties . ((file . ((type . "string") (description . "Path relative to org-directory")))
-                                    (olp . ((type . "array") (items . ((type . "string"))) (description . "Outline path (non-empty)")))
-                                    (body . ((type . "string") (description . "Content (Markdown)")))))
-                     (required . ["file" "olp" "body"]))))
-    ((name . "org_update_heading_section")
-     (description . "[Plain org] Update the body text of a heading (replace/append/prepend).")
-     (inputSchema . ((type . "object")
-                     (properties . ((file . ((type . "string") (description . "Path relative to org-directory")))
-                                    (olp . ((type . "array") (items . ((type . "string"))) (description . "Outline path (non-empty)")))
-                                    (body . ((type . "string") (description . "New content (Markdown)")))
+                     (properties . ((id . ((type . "string") (description . "Roam node ID (preferred)")))
+                                    (title . ((type . "string") (description . "Roam node title (used if id omitted)")))
+                                    (body . ((type . "string") (description . "New body content (Markdown)")))
                                     (mode . ((type . "string") (enum . ["replace" "append" "prepend"]) (description . "Default: replace")))))
-                     (required . ["file" "olp" "body"]))))
-    ((name . "org_delete_heading")
-     (description . "[Plain org] Cut a heading and its subtree. `confirm' must be true.")
-     (inputSchema . ((type . "object")
-                     (properties . ((file . ((type . "string") (description . "Path relative to org-directory")))
-                                    (olp . ((type . "array") (items . ((type . "string"))) (description . "Outline path (non-empty)")))
-                                    (confirm . ((type . "boolean") (description . "Must be true")))))
-                     (required . ["file" "olp" "confirm"]))))
-    ((name . "org_rename_heading")
-     (description . "[Plain org] Change a heading's title via `org-edit-headline'.")
-     (inputSchema . ((type . "object")
-                     (properties . ((file . ((type . "string") (description . "Path relative to org-directory")))
-                                    (olp . ((type . "array") (items . ((type . "string"))) (description . "Outline path (non-empty)")))
-                                    (new_title . ((type . "string") (description . "New heading text")))))
-                     (required . ["file" "olp" "new_title"]))))
-    ((name . "org_refile_heading")
-     (description . "[Plain org] Cut a heading subtree and paste it under another heading (or at top level of target file).")
-     (inputSchema . ((type . "object")
-                     (properties . ((file . ((type . "string") (description . "Source file, relative to org-directory")))
-                                    (olp . ((type . "array") (items . ((type . "string"))) (description . "Source outline path (non-empty)")))
-                                    (target_file . ((type . "string") (description . "Target file, relative to org-directory")))
-                                    (target_parent_olp . ((type . "array") (items . ((type . "string"))) (description . "Target parent outline path; omit for top-level of target file")))))
-                     (required . ["file" "olp" "target_file"]))))
+                     (required . ["body"]))))
 
     ;; ========================================
-    ;; Plain org: TODO / scheduling / property / tag
+    ;; Roam: metadata write tools
     ;; ========================================
-    ((name . "org_toggle_todo_state")
-     (description . "[Plain org] Change a heading's TODO state. Omit `new_state' to cycle to the next state.")
+    ((name . "roam_add_tag")
+     (description . "[Roam] Add a tag to a roam node. Edits `#+filetags:' for file-level nodes or the heading tags for heading-level nodes. Idempotent.")
      (inputSchema . ((type . "object")
-                     (properties . ((file . ((type . "string") (description . "Path relative to org-directory")))
-                                    (olp . ((type . "array") (items . ((type . "string"))) (description . "Outline path (non-empty)")))
-                                    (new_state . ((type . "string") (description . "New TODO state keyword (optional)")))))
-                     (required . ["file" "olp"]))))
-    ((name . "org_set_scheduled")
-     (description . "[Plain org] Set or remove SCHEDULED on a heading. Uses `org-schedule'.")
+                     (properties . ((id . ((type . "string") (description . "Roam node ID (preferred)")))
+                                    (title . ((type . "string") (description . "Roam node title (used if id omitted)")))
+                                    (tag . ((type . "string") (description . "Tag to add")))))
+                     (required . ["tag"]))))
+    ((name . "roam_remove_tag")
+     (description . "[Roam] Remove a tag from a roam node. Idempotent (no-op if the tag is absent).")
      (inputSchema . ((type . "object")
-                     (properties . ((file . ((type . "string") (description . "Path relative to org-directory")))
-                                    (olp . ((type . "array") (items . ((type . "string"))) (description . "Outline path (non-empty)")))
-                                    (date . ((type . "string") (description . "ISO 8601 date; empty string to remove")))))
-                     (required . ["file" "olp" "date"]))))
-    ((name . "org_set_deadline")
-     (description . "[Plain org] Set or remove DEADLINE on a heading. Uses `org-deadline'.")
+                     (properties . ((id . ((type . "string") (description . "Roam node ID (preferred)")))
+                                    (title . ((type . "string") (description . "Roam node title (used if id omitted)")))
+                                    (tag . ((type . "string") (description . "Tag to remove")))))
+                     (required . ["tag"]))))
+    ((name . "roam_set_property")
+     (description . "[Roam] Set a property on a roam node's PROPERTIES drawer. File-level nodes use the top-of-file drawer (containing :ID:); heading-level nodes use the heading's drawer. Rejects the reserved `ID' name.")
      (inputSchema . ((type . "object")
-                     (properties . ((file . ((type . "string") (description . "Path relative to org-directory")))
-                                    (olp . ((type . "array") (items . ((type . "string"))) (description . "Outline path (non-empty)")))
-                                    (date . ((type . "string") (description . "ISO 8601 date; empty string to remove")))))
-                     (required . ["file" "olp" "date"]))))
-    ((name . "org_set_property")
-     (description . "[Plain org] Set a property on a heading via `org-set-property'.")
-     (inputSchema . ((type . "object")
-                     (properties . ((file . ((type . "string") (description . "Path relative to org-directory")))
-                                    (olp . ((type . "array") (items . ((type . "string"))) (description . "Outline path (non-empty)")))
+                     (properties . ((id . ((type . "string") (description . "Roam node ID (preferred)")))
+                                    (title . ((type . "string") (description . "Roam node title (used if id omitted)")))
                                     (name . ((type . "string") (description . "Property name")))
                                     (value . ((type . "string") (description . "Property value")))))
-                     (required . ["file" "olp" "name" "value"]))))
-    ((name . "org_add_tag")
-     (description . "[Plain org] Add a tag to a heading via `org-set-tags'.")
+                     (required . ["name" "value"]))))
+    ((name . "roam_remove_property")
+     (description . "[Roam] Remove a property from a roam node's PROPERTIES drawer. Rejects the reserved `ID' name.")
      (inputSchema . ((type . "object")
-                     (properties . ((file . ((type . "string") (description . "Path relative to org-directory")))
-                                    (olp . ((type . "array") (items . ((type . "string"))) (description . "Outline path (non-empty)")))
-                                    (tag . ((type . "string") (description . "Tag to add")))))
-                     (required . ["file" "olp" "tag"]))))
-    ((name . "org_remove_tag")
-     (description . "[Plain org] Remove a tag from a heading.")
-     (inputSchema . ((type . "object")
-                     (properties . ((file . ((type . "string") (description . "Path relative to org-directory")))
-                                    (olp . ((type . "array") (items . ((type . "string"))) (description . "Outline path (non-empty)")))
-                                    (tag . ((type . "string") (description . "Tag to remove")))))
-                     (required . ["file" "olp" "tag"]))))
+                     (properties . ((id . ((type . "string") (description . "Roam node ID (preferred)")))
+                                    (title . ((type . "string") (description . "Roam node title (used if id omitted)")))
+                                    (name . ((type . "string") (description . "Property name")))))
+                     (required . ["name"]))))
 
     ;; ========================================
-    ;; Plain org: convenience + agenda
+    ;; Plain org: TODO management (agenda files only)
     ;; ========================================
     ((name . "org_add_todo")
-     (description . "[Plain org] Convenience wrapper around `org_create_heading' for TODO items. Defaults the target file to `org-default-notes-file' and the state to TODO. Supports scheduled/deadline/priority in one call.")
+     (description . "[Agenda] Create a TODO heading in an agenda file. Defaults the target file to `org-default-notes-file' (if it is in `org-agenda-files') and the state to TODO. Supports scheduled/deadline/priority in one call. File must be in `org-agenda-files'.")
      (inputSchema . ((type . "object")
-                     (properties . ((file . ((type . "string") (description . "Path relative to org-directory; default: org-default-notes-file")))
+                     (properties . ((file . ((type . "string") (description . "Path relative to org-directory; must be in org-agenda-files. Default: org-default-notes-file")))
                                     (parent_olp . ((type . "array") (items . ((type . "string"))) (description . "Parent heading outline path; omit for top-level")))
                                     (heading . ((type . "string") (description . "Heading text")))
                                     (state . ((type . "string") (description . "TODO state keyword (default: TODO)")))
@@ -595,20 +761,63 @@ Returns nil if TS is nil."
                                     (deadline . ((type . "string") (description . "ISO 8601 date")))
                                     (body . ((type . "string") (description . "Body (Markdown)")))))
                      (required . ["heading"]))))
+    ((name . "org_toggle_todo_state")
+     (description . "[Agenda] Change a heading's TODO state in an agenda file. Omit `new_state' to cycle to the next state.")
+     (inputSchema . ((type . "object")
+                     (properties . ((file . ((type . "string") (description . "Path relative to org-directory; must be in org-agenda-files")))
+                                    (olp . ((type . "array") (items . ((type . "string"))) (description . "Outline path (non-empty)")))
+                                    (new_state . ((type . "string") (description . "New TODO state keyword (optional)")))))
+                     (required . ["file" "olp"]))))
+    ((name . "org_set_scheduled")
+     (description . "[Agenda] Set or remove SCHEDULED on a heading in an agenda file.")
+     (inputSchema . ((type . "object")
+                     (properties . ((file . ((type . "string") (description . "Path relative to org-directory; must be in org-agenda-files")))
+                                    (olp . ((type . "array") (items . ((type . "string"))) (description . "Outline path (non-empty)")))
+                                    (date . ((type . "string") (description . "ISO 8601 date; empty string to remove")))))
+                     (required . ["file" "olp" "date"]))))
+    ((name . "org_set_deadline")
+     (description . "[Agenda] Set or remove DEADLINE on a heading in an agenda file.")
+     (inputSchema . ((type . "object")
+                     (properties . ((file . ((type . "string") (description . "Path relative to org-directory; must be in org-agenda-files")))
+                                    (olp . ((type . "array") (items . ((type . "string"))) (description . "Outline path (non-empty)")))
+                                    (date . ((type . "string") (description . "ISO 8601 date; empty string to remove")))))
+                     (required . ["file" "olp" "date"]))))
+    ((name . "org_set_property")
+     (description . "[Agenda] Set a property on a heading in an agenda file.")
+     (inputSchema . ((type . "object")
+                     (properties . ((file . ((type . "string") (description . "Path relative to org-directory; must be in org-agenda-files")))
+                                    (olp . ((type . "array") (items . ((type . "string"))) (description . "Outline path (non-empty)")))
+                                    (name . ((type . "string") (description . "Property name")))
+                                    (value . ((type . "string") (description . "Property value")))))
+                     (required . ["file" "olp" "name" "value"]))))
+    ((name . "org_add_tag")
+     (description . "[Agenda] Add a tag to a heading in an agenda file.")
+     (inputSchema . ((type . "object")
+                     (properties . ((file . ((type . "string") (description . "Path relative to org-directory; must be in org-agenda-files")))
+                                    (olp . ((type . "array") (items . ((type . "string"))) (description . "Outline path (non-empty)")))
+                                    (tag . ((type . "string") (description . "Tag to add")))))
+                     (required . ["file" "olp" "tag"]))))
+    ((name . "org_remove_tag")
+     (description . "[Agenda] Remove a tag from a heading in an agenda file.")
+     (inputSchema . ((type . "object")
+                     (properties . ((file . ((type . "string") (description . "Path relative to org-directory; must be in org-agenda-files")))
+                                    (olp . ((type . "array") (items . ((type . "string"))) (description . "Outline path (non-empty)")))
+                                    (tag . ((type . "string") (description . "Tag to remove")))))
+                     (required . ["file" "olp" "tag"]))))
     ((name . "org_list_todo_keywords")
-     (description . "[Plain org] List configured TODO keyword sequences and their states.")
+     (description . "[Agenda] List configured TODO keyword sequences and their states.")
      (inputSchema . ((type . "object")
                      (properties . ,(make-hash-table)))))
     ((name . "org_agenda")
-     (description . "[Plain org] Date-based agenda view for scheduled/deadline items over the next N days. Scans `org-agenda-files'.")
+     (description . "[Agenda] Date-based agenda view for scheduled/deadline items over the next N days. Scans `org-agenda-files' directly (batch-safe, does not use `org-agenda').")
      (inputSchema . ((type . "object")
                      (properties . ((span . ((type . "integer") (description . "Number of days (default: 7)"))))))))
     ((name . "org_todo_list")
-     (description . "[Plain org] List TODO items across `org-agenda-files', optionally filtered by keyword.")
+     (description . "[Agenda] List TODO items across `org-agenda-files', optionally filtered by keyword.")
      (inputSchema . ((type . "object")
                      (properties . ((match . ((type . "string") (description . "TODO keyword filter (pipe-separated for multiple)"))))))))
     ((name . "org_tags_view")
-     (description . "[Plain org] Search `org-agenda-files' by tag/property match string (e.g. \"+work-done\").")
+     (description . "[Agenda] Search `org-agenda-files' by tag/property match string (e.g. \"+work-done\").")
      (inputSchema . ((type . "object")
                      (properties . ((match . ((type . "string") (description . "Match string (e.g. '+work-done')")))
                                     (todo_only . ((type . "boolean") (description . "Only TODO items")))))

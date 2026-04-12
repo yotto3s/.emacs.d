@@ -1,27 +1,47 @@
-;;; org-files-mcp-roam.el --- Roam read-only MCP tools -*- lexical-binding: t; -*-
+;;; org-files-mcp-roam.el --- Roam MCP tools (read + write) -*- lexical-binding: t; -*-
 
 ;;; Commentary:
 
-;; Read-only org-roam tool implementations for org-files-mcp.
+;; Org-roam tool implementations for org-files-mcp.
 ;;
-;; Contains the 5 `roam_*` query tools:
+;; Read tools (5):
 ;;   roam_list_nodes, roam_get_node, roam_get_backlinks,
 ;;   roam_get_graph, roam_search_nodes.
 ;;
-;; All tools in this module are read-only by construction — they
-;; never write to roam files or the roam DB.  Any write operation
-;; on a roam-tracked file is the job of the plain-org module, which
-;; rejects such targets at the resolver layer.
+;; Content write tools (3):
+;;   roam_create_node        — create new file-level node
+;;   roam_append_to_node     — append markdown to a node's body
+;;   roam_update_node_body   — replace/append/prepend a node's body
+;;
+;; Metadata write tools (4):
+;;   roam_add_tag, roam_remove_tag       — edit tags on a node
+;;   roam_set_property, roam_remove_property — edit PROPERTIES drawer
+;;
+;; All write tools refresh the org-roam DB via `org-roam-db-update-file'
+;; after modifying a file, so queries remain consistent.
 
 ;;; Code:
 
 (require 'org-roam)
+(require 'org-id)
 (require 'cl-lib)
 
 (declare-function org-files-mcp--tool-result-json "org-files-mcp" (obj))
 (declare-function org-files-mcp--pandoc-convert "org-files-mcp" (input from-fmt to-fmt &optional heading-shift))
+(declare-function org-files-mcp--md-to-org "org-files-mcp" (md-string &optional container-level))
 (declare-function org-files-mcp--log "org-files-mcp" (fmt &rest args))
+(declare-function org-files-mcp--roam-resolve-node "org-files-mcp" (id title))
+(declare-function org-files-mcp--roam-after-write "org-files-mcp" (abs-file))
+(declare-function org-files-mcp--roam-new-filename "org-files-mcp" (title &optional override))
+(declare-function org-files-mcp--roam-file-header-end "org-files-mcp" ())
+(declare-function org-files-mcp--roam-file-filetags-edit "org-files-mcp" (op tag))
+(declare-function org-files-mcp--roam-file-level-property-edit "org-files-mcp" (op name &optional value))
+(declare-function org-files-mcp--replace-subtree-body-at-point "org-files-mcp" (org-body mode))
+(declare-function org-files-mcp--replace-file-body "org-files-mcp" (org-body mode))
+(declare-function org-files-mcp--mark-file-ai-generated "org-files-mcp" ())
+(declare-function org-files-mcp--olp-to-list "org-files-mcp" (olp))
 (defvar org-files-mcp-default-limit)
+(defvar org-files-mcp--ai-tag)
 
 ;; ============================================================
 ;; Internal helpers
@@ -223,6 +243,204 @@
                    until (>= (length res) limit)
                    finally return res)))
     (org-files-mcp--tool-result-json `((nodes . ,(vconcat results))))))
+
+;; ============================================================
+;; Write tools: content
+;; ============================================================
+
+(defun org-files-mcp--tool-roam-create-node (args)
+  "Create a new file-level roam node.
+Always adds `org-files-mcp--ai-tag' to the node's `#+filetags:'."
+  (let* ((title (alist-get 'title args))
+         (user-tags (org-files-mcp--olp-to-list (alist-get 'tags args)))
+         (tags (if (member org-files-mcp--ai-tag user-tags)
+                   user-tags
+                 (append user-tags (list org-files-mcp--ai-tag))))
+         (body (alist-get 'body args))
+         (filename (alist-get 'filename args))
+         (id (org-id-new))
+         (abs (org-files-mcp--roam-new-filename title filename)))
+    (unless (and title (not (string-empty-p title)))
+      (error "title is required"))
+    (unless (file-directory-p (file-name-directory abs))
+      (error "Parent directory does not exist: %s" (file-name-directory abs)))
+    (with-temp-file abs
+      (insert ":PROPERTIES:\n:ID:       " id "\n:END:\n")
+      (insert "#+title: " title "\n")
+      (insert "#+filetags: :" (mapconcat #'identity tags ":") ":\n")
+      (insert "\n")
+      (when (and body (not (string-empty-p body)))
+        (insert (org-files-mcp--md-to-org body 0))
+        (unless (string-suffix-p "\n" body) (insert "\n"))))
+    (org-files-mcp--roam-after-write abs)
+    (org-files-mcp--tool-result-json
+     `((status . "ok")
+       (id . ,id)
+       (file . ,abs)
+       (title . ,title)))))
+
+(defun org-files-mcp--tool-roam-append-to-node (args)
+  "Append markdown body content to an existing roam node."
+  (let* ((id (alist-get 'id args))
+         (title (alist-get 'title args))
+         (body (alist-get 'body args))
+         (node (org-files-mcp--roam-resolve-node id title))
+         (file (org-roam-node-file node))
+         (level (org-roam-node-level node))
+         (node-id (org-roam-node-id node))
+         (org-body (org-files-mcp--md-to-org body level)))
+    (unless (and body (not (string-empty-p body)))
+      (error "body is required"))
+    (with-current-buffer (find-file-noselect file)
+      (save-excursion
+        (save-restriction
+          (widen)
+          (if (> level 0)
+              (progn
+                (goto-char (org-roam-node-point node))
+                (org-end-of-subtree t)
+                (unless (bolp) (insert "\n"))
+                (insert org-body)
+                (unless (string-suffix-p "\n" org-body) (insert "\n")))
+            (goto-char (point-max))
+            (unless (bolp) (insert "\n"))
+            (insert org-body)
+            (unless (string-suffix-p "\n" org-body) (insert "\n")))))
+      (org-files-mcp--mark-file-ai-generated)
+      (save-buffer))
+    (org-files-mcp--roam-after-write file)
+    (org-files-mcp--tool-result-json
+     `((status . "ok") (id . ,node-id) (file . ,file)))))
+
+(defun org-files-mcp--tool-roam-update-node-body (args)
+  "Replace/append/prepend the body of a roam node."
+  (let* ((id (alist-get 'id args))
+         (title (alist-get 'title args))
+         (body (alist-get 'body args))
+         (mode (or (alist-get 'mode args) "replace"))
+         (node (org-files-mcp--roam-resolve-node id title))
+         (file (org-roam-node-file node))
+         (level (org-roam-node-level node))
+         (node-id (org-roam-node-id node))
+         (org-body (org-files-mcp--md-to-org body level)))
+    (unless body (error "body is required"))
+    (with-current-buffer (find-file-noselect file)
+      (save-excursion
+        (save-restriction
+          (widen)
+          (if (> level 0)
+              (progn
+                (goto-char (org-roam-node-point node))
+                (org-files-mcp--replace-subtree-body-at-point org-body mode))
+            (org-files-mcp--replace-file-body org-body mode))))
+      (org-files-mcp--mark-file-ai-generated)
+      (save-buffer))
+    (org-files-mcp--roam-after-write file)
+    (org-files-mcp--tool-result-json
+     `((status . "ok") (id . ,node-id) (file . ,file) (mode . ,mode)))))
+
+;; ============================================================
+;; Write tools: metadata (tags + properties)
+;; ============================================================
+
+(defun org-files-mcp--roam-edit-tag (op args)
+  "Common body for `roam_add_tag' / `roam_remove_tag'. OP is `add' or `remove'."
+  (let* ((id (alist-get 'id args))
+         (title (alist-get 'title args))
+         (tag (alist-get 'tag args))
+         (node (org-files-mcp--roam-resolve-node id title))
+         (file (org-roam-node-file node))
+         (level (org-roam-node-level node))
+         (node-id (org-roam-node-id node)))
+    (unless (and tag (not (string-empty-p tag)))
+      (error "tag is required"))
+    (when (and (eq op 'remove) (equal tag org-files-mcp--ai-tag))
+      (error "Refusing to remove AI tag `%s' via MCP; edit in Emacs if intended"
+             org-files-mcp--ai-tag))
+    (with-current-buffer (find-file-noselect file)
+      (save-excursion
+        (save-restriction
+          (widen)
+          (if (> level 0)
+              (progn
+                (goto-char (org-roam-node-point node))
+                (let* ((current (or (org-get-tags nil t) '()))
+                       (new (pcase op
+                              ('add (if (member tag current) current
+                                      (append current (list tag))))
+                              ('remove (delete tag (copy-sequence current))))))
+                  (unless (equal current new)
+                    (org-set-tags new))))
+            (org-files-mcp--roam-file-filetags-edit op tag))))
+      (save-buffer))
+    (org-files-mcp--roam-after-write file)
+    (org-files-mcp--tool-result-json
+     `((status . "ok") (id . ,node-id) (file . ,file) (tag . ,tag)))))
+
+(defun org-files-mcp--tool-roam-add-tag (args)
+  "Add a tag to a roam node."
+  (org-files-mcp--roam-edit-tag 'add args))
+
+(defun org-files-mcp--tool-roam-remove-tag (args)
+  "Remove a tag from a roam node."
+  (org-files-mcp--roam-edit-tag 'remove args))
+
+(defun org-files-mcp--tool-roam-set-property (args)
+  "Set a property on a roam node (file-level or heading-level)."
+  (let* ((id (alist-get 'id args))
+         (title (alist-get 'title args))
+         (name (alist-get 'name args))
+         (value (alist-get 'value args))
+         (node (org-files-mcp--roam-resolve-node id title))
+         (file (org-roam-node-file node))
+         (level (org-roam-node-level node))
+         (node-id (org-roam-node-id node)))
+    (unless (and name (not (string-empty-p name)))
+      (error "name is required"))
+    (unless value (error "value is required"))
+    (when (equal (upcase name) "ID")
+      (error "Refusing to modify :ID: on a roam node"))
+    (with-current-buffer (find-file-noselect file)
+      (save-excursion
+        (save-restriction
+          (widen)
+          (if (> level 0)
+              (progn
+                (goto-char (org-roam-node-point node))
+                (org-set-property name value))
+            (org-files-mcp--roam-file-level-property-edit 'set name value))))
+      (save-buffer))
+    (org-files-mcp--roam-after-write file)
+    (org-files-mcp--tool-result-json
+     `((status . "ok") (id . ,node-id) (file . ,file)
+       (name . ,name) (value . ,value)))))
+
+(defun org-files-mcp--tool-roam-remove-property (args)
+  "Remove a property from a roam node."
+  (let* ((id (alist-get 'id args))
+         (title (alist-get 'title args))
+         (name (alist-get 'name args))
+         (node (org-files-mcp--roam-resolve-node id title))
+         (file (org-roam-node-file node))
+         (level (org-roam-node-level node))
+         (node-id (org-roam-node-id node)))
+    (unless (and name (not (string-empty-p name)))
+      (error "name is required"))
+    (when (equal (upcase name) "ID")
+      (error "Refusing to remove :ID: from a roam node"))
+    (with-current-buffer (find-file-noselect file)
+      (save-excursion
+        (save-restriction
+          (widen)
+          (if (> level 0)
+              (progn
+                (goto-char (org-roam-node-point node))
+                (org-entry-delete (point) name))
+            (org-files-mcp--roam-file-level-property-edit 'remove name))))
+      (save-buffer))
+    (org-files-mcp--roam-after-write file)
+    (org-files-mcp--tool-result-json
+     `((status . "ok") (id . ,node-id) (file . ,file) (name . ,name)))))
 
 (provide 'org-files-mcp-roam)
 
