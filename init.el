@@ -241,6 +241,34 @@
   :custom
   (inferior-lisp-program "ros -Q run"))
 
+;; gptel
+(use-package gptel
+  :ensure t
+  :config
+  (setq gptel-backend
+        (gptel-make-ollama "Ollama"
+          :host "localhost:11434"
+          :stream t
+          :models '(qwen2.5-coder:14b))
+        gptel-model 'qwen2.5-coder:14b))
+
+;; gptel-aibo
+(use-package gptel-aibo
+  :ensure t
+  :after gptel
+  :bind (:map gptel-aibo-mode-map
+         ("C-c !" . gptel-aibo-apply-last-suggestions)
+         ("C-c /" . gptel-aibo-apply-last-suggestions)))
+
+;; Ollama unload helper
+(defun my/ollama-unload ()
+  "Unload the current Ollama model from memory."
+  (interactive)
+  (start-process "ollama-unload" nil "ollama" "stop" "qwen2.5-coder:14b")
+  (message "Unloading qwen2.5-coder:14b"))
+
+(keymap-global-set "C-c o u" #'my/ollama-unload)
+
 ;;; Magit
 
 (use-package magit
