@@ -4,8 +4,9 @@
 
 (require 'package)
 (setq package-archives
-      '(("melpa" . "https://melpa.org/packages/")
-        ("gnu"   . "https://elpa.gnu.org/packages/")))
+      '(("melpa"  . "https://melpa.org/packages/")
+        ("gnu"    . "https://elpa.gnu.org/packages/")
+        ("nongnu" . "https://elpa.nongnu.org/nongnu/")))
 (package-initialize)
 (unless package-archive-contents (package-refresh-contents))
 (require 'use-package)
@@ -241,33 +242,46 @@
   :custom
   (inferior-lisp-program "ros -Q run"))
 
-;; gptel
+;;; gptel
+(setq package-pinned-packages '((gptel . "nongnu")))
 (use-package gptel
   :ensure t
+  :bind
+  (("C-c g g" . gptel)              ; Open/switch to chat buffer
+   ("C-c g s" . gptel-send)         ; Send prompt (buffer up to point, or region)
+   ("C-c g m" . gptel-menu)         ; Transient menu (backend, model, options)
+   ("C-c g a" . gptel-add)          ; Add region/buffer/file to context
+   ("C-c g f" . gptel-add-file)     ; Add file to context
+   ("C-c g r" . gptel-rewrite)      ; Rewrite/refactor region
+   ("C-c g k" . gptel-abort))       ; Cancel ongoing request
   :config
-  (setq gptel-backend
-        (gptel-make-ollama "Ollama"
-          :host "localhost:11434"
-          :stream t
-          :models '(qwen2.5-coder:14b))
-        gptel-model 'qwen2.5-coder:14b))
+  ;; Copilot as default (authenticates via GitHub device flow)
+  (setq gptel-backend (gptel-make-gh-copilot "Copilot" :stream t)
+        gptel-model 'gpt-4.1)
+  (gptel-make-ollama "Ollama"
+    :host "localhost:11434"
+    :stream t
+    :models '(qwen2.5-coder:14b))
+  :custom
+  (gptel-default-mode 'org-mode))
 
-;; gptel-aibo
+;;; gptel-aibo
 (use-package gptel-aibo
   :ensure t
   :after gptel
-  :bind (:map gptel-aibo-mode-map
-         ("C-c !" . gptel-aibo-apply-last-suggestions)
-         ("C-c /" . gptel-aibo-apply-last-suggestions)))
+  :bind
+  (("C-c g i" . gptel-aibo)         ; Open aibo console
+   ("C-c g q" . gptel-aibo-summon)  ; Quick inline generation at point
+   :map gptel-aibo-mode-map
+   ("C-c !" . gptel-aibo-apply-last-suggestions)
+   ("C-c /" . gptel-aibo-apply-last-suggestions)))
 
-;; Ollama unload helper
-(defun my/ollama-unload ()
-  "Unload the current Ollama model from memory."
-  (interactive)
-  (start-process "ollama-unload" nil "ollama" "stop" "qwen2.5-coder:14b")
-  (message "Unloading qwen2.5-coder:14b"))
-
-(keymap-global-set "C-c o u" #'my/ollama-unload)
+;;; gptel-magit
+(use-package gptel-magit
+  :ensure t
+  :after (gptel magit)
+  :bind (:map git-commit-mode-map
+         ("C-c g c" . gptel-magit-commit-message)))
 
 ;;; Magit
 
