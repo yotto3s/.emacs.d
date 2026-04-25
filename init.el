@@ -104,7 +104,7 @@
 (use-package org
   :ensure nil
   :custom
-  (org-directory "~/orgfiles")
+  (org-directory "~/gdrive-orgfiles/")
   (org-default-notes-file (expand-file-name "refile.org" org-directory))
   (org-agenda-files (list (expand-file-name "inbox.org" org-directory)))
   (org-archive-location (expand-file-name "archive.org::" org-directory))
