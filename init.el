@@ -105,9 +105,9 @@
   :ensure nil
   :custom
   (org-directory "~/orgfiles")
-  (org-default-notes-file (expand-file-name "inbox.org" org-directory))
+  (org-default-notes-file (expand-file-name "refile.org" org-directory))
   (org-agenda-files (list (expand-file-name "inbox.org" org-directory)))
-  (org-archive-location "::* Archive")
+  (org-archive-location (expand-file-name "archive.org::" org-directory))
   (org-refile-targets
    '((nil :maxlevel . 3)                 ; current file, up to 3 levels deep
      (org-agenda-files :maxlevel . 2)    ; all agenda files
@@ -125,6 +125,12 @@
       "* TODO %?\n  %U\n")
      ("m" "Memo" entry (file "refile.org")
       "* %?\n  %U\n")))
+  :config
+  (org-babel-do-load-languages
+   'org-babel-load-languages
+   '((emacs-lisp . t)
+     (shell       . t)
+     (python      . t)))
   :bind (("C-c a" . org-agenda)
          ("C-c c" . org-capture)
          ("C-c l" . org-store-link)))
